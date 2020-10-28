@@ -1,0 +1,138 @@
+---
+title: "Computations Range with compensated data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r functions created for analysis}
+
+
+# Function used to specify values for the gating of unstained and stained cells
+FilterCOnstruction<-function(mixedanalysis,v,distance,data){
+  highBoundary<-qnorm(0.70,mean=mixedanalysis$mu[v],sd=mixedanalysis$sigma[v])
+    lowBoundary<-qnorm(0.30,mean=mixedanalysis$mu[v],sd=mixedanalysis$sigma[v])
+    indexStained<-which(distance < highBoundary & distance > lowBoundary)
+    minvalues<-min(data[indexStained])
+    maxvalues<-max(data[indexStained])
+    filterValues<-c(minvalues,maxvalues)
+    filterValues
+}
+```
+### Reading in data
+
+```{r def.files.list}
+#creation of a variable to defined the folder where fcs files are store
+files.dir <- "C:/Users/renau/Desktop/FCMS/Fusion 1/Compensated F1"
+#Obtention of the list of files contained in the folder
+files.list <- dir(file.path(files.dir))
+#Selection of the .fcs file in the list of files contained in the folder
+files <- list.files(path= files.dir ,pattern = "\\.fcs$")
+```
+First we read the data and import them in R using the package flowCore allowing us to import fcs data file in R. We then create a data frame called pdata in order to insert more information about the fcs files. Namely, the name of the files and finally the detector corresponding to the fluorescent beads used for each fcs file. 
+```{r read.data, message = FALSE, warning = FALSE}
+#libraries needed for the code to run
+library(MetaCyto)
+library(flowCore)
+library(flowStats)
+library(mixtools)
+library(ggcyto)
+
+#We import all the data in R
+dataFCMS<-vector(mode = "list", length = length(files))
+
+for ( k in 1:length(files)){
+  dataFCMS[[k]] <- read.FCS(file.path(files.dir, files[k]),
+                  transformation = FALSE)
+}
+
+#Creation of simplified names for each file
+namesFiles<-Reduce(rbind,strsplit( files,"_"))[,3]
+namesDetectors<-colnames(dataFCMS[[1]]@exprs)
+
+#Creation of the variable containing the name of the detector related to each fcs file
+detectorsOfInterest<-namesDetectors[c(7,6,5,10,9,8,13,12,11,14)]
+
+#creation of the pdata table
+pdata<-data.frame(file=files,names=namesFiles,detector=detectorsOfInterest)
+
+```
+
+
+```{r plot computing Range}
+
+#Creation of the Matrix of range values
+RangeMatrix <- matrix(0,nrow=length(detectorsOfInterest),ncol=length(detectorsOfInterest))
+
+rownames(RangeMatrix) <- detectorsOfInterest
+colnames(RangeMatrix) <- detectorsOfInterest
+names(detectorsOfInterest)<-detectorsOfInterest
+
+#Double for loop to compute for each detector the ranges with the other detectors. The range matrix is not symmetric so we cannot simplify further the computation.
+for (k in detectorsOfInterest){
+  #Obtention of the intensity data corresponding to the detector we want to compute ranges
+  rawdataDetectors<-exprs(dataFCMS[[which(pdata$detector==k)]])
+  #Obtention of the absolute intensity for each beads on the main detector 
+  distance<-abs(rawdataDetectors[,which(colnames(rawdataDetectors)==k)])
+  #Mixed distribution analysis of the distribution of the absolute intensity
+  analysisdistancedistribution<-normalmixEM(distance, k=2, lambda = c(0.2,0.8))
+  #Obtention of the values for gating the unstained beads population for the main detector
+  filterNegativeValues<-list(FilterCOnstruction(analysisdistancedistribution,1,distance,rawdataDetectors[,which(colnames(rawdataDetectors)==k)]))
+  names(filterNegativeValues)<-k
+  #Creation of the gating filter for unstained beads
+  rectGateUnstained <- rectangleGate(filterId="Unstained region",
+filterNegativeValues)
+  #Obtention of the subset of stained beads for the main detector
+  Unstained<-Subset(dataFCMS[[which(pdata$detector==k)]],rectGateUnstained)
+  #Obtention of the values for gating the stained beads population for the main detector
+  filterPositiveValues<-list(FilterCOnstruction(analysisdistancedistribution,2,distance,rawdataDetectors[,which(colnames(rawdataDetectors)==k)]))
+  names(filterPositiveValues)<-k
+  #Creation of the gating filter for stained beads for the main detector
+  rectGatePositive <- rectangleGate(filterId=paste('Positive Controls',k,sep=' '),
+filterPositiveValues)
+  #Obtention of the subset of stained beads used for range computation
+  PositiveControls<-Subset(dataFCMS[[which(pdata$detector==k)]],rectGatePositive)
+  for ( l in detectorsOfInterest[which(detectorsOfInterest!=k)]){
+    #Obtention of the intensity data for the other detector l
+    rawdataDetectorsB<-exprs(dataFCMS[[which(pdata$detector==l)]])
+    #Obtention of the absolute intensity for each beads obtained on the detector l
+    distanceB<-abs(rawdataDetectorsB[,which(colnames(rawdataDetectorsB)==l)])
+    #Obtention of the absolute intensity for each beads on the detector l
+    analysisdistancedistribution<-normalmixEM(distanceB, k=2, lambda = c(0.5,0.5))
+    #Obtention of the subset of stained beads for the detector l
+    filterPositiveValuesB<-list(FilterCOnstruction(analysisdistancedistribution,2,distanceB,rawdataDetectorsB[,which(colnames(rawdataDetectorsB)==l)]))
+    names(filterPositiveValuesB)<-l
+    #Creation of the gating filter for stained beads for the detector l
+    rectGatePositiveB <- rectangleGate(filterId=paste('Positive Controls',k,sep=' '),
+filterPositiveValuesB)
+    #Obtention of the subset of stained beads for the detector l
+    PositiveControlsB<-Subset(dataFCMS[[which(pdata$detector==l)]],rectGatePositiveB)
+    #Computation of the median intensity for the set of positive beads for detector l
+    YStB50<-median(exprs(PositiveControlsB)[,l])
+    #Computation of the median intensity for detector l of the unstained beads for the main detector
+    UnB50<-median(exprs(Unstained)[,l])
+    NFYB<-(90000/(YStB50-UnB50))/10
+    #computation of the median intensity for the main detector of the stained beads for the main detector
+    XB50<-median(exprs(PositiveControls)[,l])
+    #computation of the 99th quantile intensity for the main detector of the stained beads for the main detector
+    XB99<-quantile(exprs(PositiveControls)[,l],0.99)
+    #computation of the range between main detector k and detector l
+    Range<-(XB99-XB50)*NFYB
+    RangeMatrix[k,l]<-Range
+  }
+  
+}
+
+#Saving matrix in a txt file
+write.table(RangeMatrix,paste(files.dir,'/RangesCompensatedReplicate1.txt',sep=''),sep='\t',quote=F)
+```
+
+
+
+
+
+
+
